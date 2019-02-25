@@ -163,6 +163,10 @@ pub struct Server {
     /// pure bootstrap server when we don't have friends and therefore don't
     /// have to handle related packets.
     net_crypto: Option<NetCrypto>,
+
+    onion_announce_tx: Option<mpsc::UnboundedSender<(OnionAnnounceResponse, SocketAddr)>>,
+    onion_data_tx: Option<mpsc::UnboundedSender<(OnionDataResponse, SocketAddr)>>,
+
     /// If LAN discovery is enabled `Server` will handle `LanDiscovery` packets
     /// and send `NodesRequest` packets in reply.
     lan_discovery_enabled: bool,
@@ -217,6 +221,8 @@ impl Server {
             bootstrap_info: None,
             tcp_onion_sink: None,
             net_crypto: None,
+            onion_announce_tx: None,
+            onion_data_tx: None,
             lan_discovery_enabled: true,
             is_ipv6_enabled: false,
             initial_bootstrap: Vec::new(),
@@ -701,14 +707,8 @@ impl Server {
             Packet::OnionResponse1(packet) => Box::new(self.handle_onion_response_1(packet)),
             Packet::BootstrapInfo(packet) => Box::new(self.handle_bootstrap_info(&packet, addr)),
             Packet::CryptoData(packet) => Box::new(self.handle_crypto_data(&packet, addr)),
-            // This packet should be handled in client only
-            Packet::OnionDataResponse(_packet) => Box::new(future::err(
-                HandlePacketError::from(HandlePacketErrorKind::NotHandled)
-            )),
-            // This packet should be handled in client only
-            Packet::OnionAnnounceResponse(_packet) => Box::new(future::err(
-                HandlePacketError::from(HandlePacketErrorKind::NotHandled)
-            )),
+            Packet::OnionDataResponse(packet) => Box::new(self.handle_onion_data_response(packet, addr)),
+            Packet::OnionAnnounceResponse(packet) => Box::new(self.handle_onion_announce_response(packet, addr)),
         }
     }
 
@@ -1386,6 +1386,24 @@ impl Server {
         }
     }
 
+    fn handle_onion_announce_response(&self, packet: OnionAnnounceResponse, addr: SocketAddr) -> impl Future<Item = (), Error = HandlePacketError> + Send {
+        if let Some(ref onion_announce_tx) = self.onion_announce_tx {
+            Either::A(send_to(onion_announce_tx, (packet, addr))
+                .map_err(HandlePacketError::from))
+        } else {
+            Either::B(future::err(HandlePacketError::from(HandlePacketErrorKind::OnionOrNetCrypto)))
+        }
+    }
+
+    fn handle_onion_data_response(&self, packet: OnionDataResponse, addr: SocketAddr) -> impl Future<Item = (), Error = HandlePacketError> + Send {
+        if let Some(ref onion_data_tx) = self.onion_data_tx {
+            Either::A(send_to(onion_data_tx, (packet, addr))
+                .map_err(HandlePacketError::from))
+        } else {
+            Either::B(future::err(HandlePacketError::from(HandlePacketErrorKind::OnionOrNetCrypto)))
+        }
+    }
+
     /// Set toxcore version and message of the day callback.
     pub fn set_bootstrap_info(&mut self, version: u32, motd_cb: Box<Fn(&Server) -> Vec<u8> + Send + Sync>) {
         self.bootstrap_info = Some(ServerBootstrapInfo {
@@ -1407,6 +1425,14 @@ impl Server {
     /// Set sink to send friend's `SocketAddr` when it gets known.
     pub fn set_friend_saddr_sink(&mut self, friend_saddr_sink: mpsc::UnboundedSender<PackedNode>) {
         self.friend_saddr_sink = Some(friend_saddr_sink);
+    }
+
+    pub fn set_onion_announce_response_sink(&mut self, tx: mpsc::UnboundedSender<(OnionAnnounceResponse, SocketAddr)>) {
+        self.onion_announce_tx = Some(tx);
+    }
+
+    pub fn set_onion_data_response_sink(&mut self, tx: mpsc::UnboundedSender<(OnionDataResponse, SocketAddr)>) {
+        self.onion_data_tx = Some(tx);
     }
 
     /// Get `PrecomputedKey`s cache.
