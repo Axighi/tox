@@ -38,7 +38,7 @@ impl ServerExt for Server {
                 }
             }
         ).and_then(|event| event).for_each(move |(packet, addr)| {
-            trace!("Received packet {:?}", packet);
+            info!("Received packet {:?}", packet);
             self_c.handle_packet(packet, addr).or_else(|err| {
                 error!("Failed to handle packet: {:?}", err);
                 future::ok(())

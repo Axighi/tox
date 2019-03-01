@@ -119,7 +119,7 @@ pub struct Server {
     /// Tx split of a channel to send packets to this peer via UDP socket.
     pub tx: Tx,
     /// Sink to send friend's `SocketAddr` when it gets known.
-    friend_saddr_sink: Option<mpsc::UnboundedSender<PackedNode>>,
+    friend_saddr_sink: Arc<RwLock<Option<mpsc::UnboundedSender<PackedNode>>>>,
     /// Struct that stores and manages requests IDs and timeouts.
     request_queue: Arc<RwLock<RequestQueue<PublicKey>>>,
     /// Close nodes list which contains nodes close to own DHT `PublicKey`.
@@ -164,8 +164,8 @@ pub struct Server {
     /// have to handle related packets.
     net_crypto: Option<NetCrypto>,
 
-    onion_announce_tx: Option<mpsc::UnboundedSender<(OnionAnnounceResponse, SocketAddr)>>,
-    onion_data_tx: Option<mpsc::UnboundedSender<(OnionDataResponse, SocketAddr)>>,
+    onion_announce_tx: Arc<RwLock<Option<mpsc::UnboundedSender<(OnionAnnounceResponse, SocketAddr)>>>>,
+    onion_data_tx: Arc<RwLock<Option<mpsc::UnboundedSender<(OnionDataResponse, SocketAddr)>>>>,
 
     /// If LAN discovery is enabled `Server` will handle `LanDiscovery` packets
     /// and send `NodesRequest` packets in reply.
@@ -208,7 +208,7 @@ impl Server {
             sk,
             pk,
             tx,
-            friend_saddr_sink: None,
+            friend_saddr_sink: Arc::new(RwLock::new(None)),
             request_queue: Arc::new(RwLock::new(RequestQueue::new(Duration::from_secs(PING_TIMEOUT)))),
             close_nodes: Arc::new(RwLock::new(Ktree::new(&pk))),
             onion_symmetric_key: Arc::new(RwLock::new(secretbox::gen_key())),
@@ -221,8 +221,8 @@ impl Server {
             bootstrap_info: None,
             tcp_onion_sink: None,
             net_crypto: None,
-            onion_announce_tx: None,
-            onion_data_tx: None,
+            onion_announce_tx: Arc::new(RwLock::new(None)),
+            onion_data_tx: Arc::new(RwLock::new(None)),
             lan_discovery_enabled: true,
             is_ipv6_enabled: false,
             initial_bootstrap: Vec::new(),
@@ -752,7 +752,7 @@ impl Server {
         for friend in friends.values_mut() {
             friend.try_add_to_close(node);
         }
-        if let Some(ref friend_saddr_sink) = self.friend_saddr_sink {
+        if let Some(ref friend_saddr_sink) = *self.friend_saddr_sink.read() {
             if friends.contains_key(&node.pk) {
                 Either::A(send_to(friend_saddr_sink, node)
                     .map_err(|e| e.context(HandlePacketErrorKind::FriendSaddr).into()))
@@ -1387,7 +1387,7 @@ impl Server {
     }
 
     fn handle_onion_announce_response(&self, packet: OnionAnnounceResponse, addr: SocketAddr) -> impl Future<Item = (), Error = HandlePacketError> + Send {
-        if let Some(ref onion_announce_tx) = self.onion_announce_tx {
+        if let Some(ref onion_announce_tx) = *self.onion_announce_tx.read() {
             Either::A(send_to(onion_announce_tx, (packet, addr))
                 .map_err(HandlePacketError::from))
         } else {
@@ -1396,7 +1396,7 @@ impl Server {
     }
 
     fn handle_onion_data_response(&self, packet: OnionDataResponse, addr: SocketAddr) -> impl Future<Item = (), Error = HandlePacketError> + Send {
-        if let Some(ref onion_data_tx) = self.onion_data_tx {
+        if let Some(ref onion_data_tx) = *self.onion_data_tx.read() {
             Either::A(send_to(onion_data_tx, (packet, addr))
                 .map_err(HandlePacketError::from))
         } else {
@@ -1423,16 +1423,16 @@ impl Server {
     }
 
     /// Set sink to send friend's `SocketAddr` when it gets known.
-    pub fn set_friend_saddr_sink(&mut self, friend_saddr_sink: mpsc::UnboundedSender<PackedNode>) {
-        self.friend_saddr_sink = Some(friend_saddr_sink);
+    pub fn set_friend_saddr_sink(&self, friend_saddr_sink: mpsc::UnboundedSender<PackedNode>) {
+        *self.friend_saddr_sink.write() = Some(friend_saddr_sink);
     }
 
-    pub fn set_onion_announce_response_sink(&mut self, tx: mpsc::UnboundedSender<(OnionAnnounceResponse, SocketAddr)>) {
-        self.onion_announce_tx = Some(tx);
+    pub fn set_onion_announce_response_sink(&self, tx: mpsc::UnboundedSender<(OnionAnnounceResponse, SocketAddr)>) {
+        *self.onion_announce_tx.write() = Some(tx);
     }
 
-    pub fn set_onion_data_response_sink(&mut self, tx: mpsc::UnboundedSender<(OnionDataResponse, SocketAddr)>) {
-        self.onion_data_tx = Some(tx);
+    pub fn set_onion_data_response_sink(&self, tx: mpsc::UnboundedSender<(OnionDataResponse, SocketAddr)>) {
+        *self.onion_data_tx.write() = Some(tx);
     }
 
     /// Get `PrecomputedKey`s cache.
