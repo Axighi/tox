@@ -12,7 +12,7 @@ mod msi;
 mod file_control;
 mod typing;
 mod user_status;
-mod file_data;
+pub mod file_data;
 mod status_message;
 mod file_send_request;
 

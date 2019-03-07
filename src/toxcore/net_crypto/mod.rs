@@ -69,7 +69,7 @@ const PACKET_ID_LOSSY_RANGE_START: u8 = 192;
 const PACKET_ID_LOSSY_RANGE_END: u8 = 254;
 
 /// Timeout for packet sending
-const NET_CRYPTO_SEND_TIMEOUT: Duration = Duration::from_millis(50);
+pub const NET_CRYPTO_SEND_TIMEOUT: Duration = Duration::from_millis(50);
 
 /// Shorthand for the transmit half of the message channel for sending DHT
 /// packets.
@@ -763,7 +763,7 @@ impl NetCrypto {
     }
 
     /// Send `CryptoData` packet if the connection is established.
-    fn send_data_packet(&self, connection: &mut CryptoConnection, data: Vec<u8>, packet_number: u32)
+    pub fn send_data_packet(&self, connection: &mut CryptoConnection, data: Vec<u8>, packet_number: u32)
         -> impl Future<Item = (), Error = SendDataError> + Send {
         let packet = match connection.status {
             ConnectionStatus::NotConfirmed { ref mut sent_nonce, ref session_precomputed_key, .. }
