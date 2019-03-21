@@ -240,3 +240,150 @@ impl From<SendPacketError> for RecvPacketError {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn send_packet_error() {
+        let error = SendPacketError::from(SendPacketErrorKind::SendToLossless);
+        assert!(error.cause().is_none());
+        assert_eq!(format!("{}", error), "Sending packet using net_crypto failed".to_owned());
+    }
+    #[test]
+    fn send_packet_serialize() {
+        let gen_error = GenError::InvalidOffset;
+        let error = SendPacketError::serialize(gen_error);
+        assert_eq!(format!("{}", error), "Serialize packet error: InvalidOffset".to_owned());
+    }
+    #[test]
+    fn send_packet_no_net_crypto() {
+        let error = SendPacketError::from(SendPacketErrorKind::NoNetCrypto);
+        assert_eq!(format!("{}", error), "There is no net_crypto object assigned".to_owned());
+    }
+    #[test]
+    fn send_packet_not_online() {
+        let error = SendPacketError::from(SendPacketErrorKind::NotOnline);
+        assert_eq!(format!("{}", error), "The friend is not online".to_owned());
+    }
+    #[test]
+    fn send_packet_not_acepted() {
+        let error = SendPacketError::from(SendPacketErrorKind::NotAccepted);
+        assert_eq!(format!("{}", error), "File transfer is not accepted by peer".to_owned());
+    }
+    #[test]
+    fn send_packet_larger_position() {
+        let error = SendPacketError::from(SendPacketErrorKind::LargerPosition);
+        assert_eq!(format!("{}", error), "Position of file chunk request is larger than file size".to_owned());
+    }
+    #[test]
+    fn send_packet_no_file_transfer() {
+        let error = SendPacketError::from(SendPacketErrorKind::NoFileTransfer);
+        assert_eq!(format!("{}", error), "There is no file transfer session opened".to_owned());
+    }
+    #[test]
+    fn send_packet_no_friend() {
+        let error = SendPacketError::from(SendPacketErrorKind::NoFriend);
+        assert_eq!(format!("{}", error), "The friend don't exist in messenger's friend list".to_owned());
+    }
+    #[test]
+    fn send_packet_invalid_request() {
+        let error = SendPacketError::from(SendPacketErrorKind::InvalidRequest);
+        assert_eq!(format!("{}", error), "File control request is invalid on current status".to_owned());
+    }
+    #[test]
+    fn send_packet_invalid_request2() {
+        let error = SendPacketError::from(SendPacketErrorKind::InvalidRequest2);
+        assert_eq!(format!("{}", error), "File control request is invalid on current status".to_owned());
+    }
+    #[test]
+    fn send_packet_invalid_request3() {
+        let error = SendPacketError::from(SendPacketErrorKind::InvalidRequest3);
+        assert_eq!(format!("{}", error), "File control request is invalid on current status".to_owned());
+    }
+    #[test]
+    fn send_packet_invalid_request4() {
+        let error = SendPacketError::from(SendPacketErrorKind::InvalidRequest4);
+        assert_eq!(format!("{}", error), "File control request is invalid on current status".to_owned());
+    }
+    #[test]
+    fn send_packet_invalid_request5() {
+        let error = SendPacketError::from(SendPacketErrorKind::InvalidRequest5);
+        assert_eq!(format!("{}", error), "File control request is invalid on current status".to_owned());
+    }
+    #[test]
+    fn recv_packet_error() {
+        let error = RecvPacketError::from(RecvPacketErrorKind::SendTo);
+        assert!(error.cause().is_none());
+        assert_eq!(format!("{}", error), "Sending packet to client failed".to_owned());
+    }
+    #[test]
+    fn recv_packet_invalid_request() {
+        let pk = PublicKey([103, 172, 218, 234, 171, 161, 30, 254, 31, 40, 20, 147, 203, 248, 235, 88, 113, 171, 62,
+        142, 166, 125, 78, 57, 26, 16, 80, 5, 65, 113, 68, 15]);
+        let error = RecvPacketError::invalid_request(pk, 1);
+        assert_eq!(*error.kind(), RecvPacketErrorKind::InvalidReq { pk: pk, file_id: 1 });
+        assert_eq!(format!("{}", error), "File control request is invalid for current status: PK = \
+        PublicKey([103, 172, 218, 234, 171, 161, 30, 254, 31, 40, 20, 147, 203, 248, 235, 88, 113, 171, 62, \
+        142, 166, 125, 78, 57, 26, 16, 80, 5, 65, 113, 68, 15]) file_id = 1".to_owned());
+    }
+    #[test]
+    fn recv_packet_exceed_size() {
+        let pk = PublicKey([103, 172, 218, 234, 171, 161, 30, 254, 31, 40, 20, 147, 203, 248, 235, 88, 113, 171, 62,
+        142, 166, 125, 78, 57, 26, 16, 80, 5, 65, 113, 68, 15]);
+        let error = RecvPacketError::exceed_size(pk, 1, 100);
+        assert_eq!(*error.kind(), RecvPacketErrorKind::ExceedSize { pk, file_id: 1, file_size: 100 });
+        assert_eq!(format!("{}", error), "File seek position exceeds file size: PK = \
+        PublicKey([103, 172, 218, 234, 171, 161, 30, 254, 31, 40, 20, 147, 203, 248, 235, 88, 113, 171, 62, \
+        142, 166, 125, 78, 57, 26, 16, 80, 5, 65, 113, 68, 15]) file_id = 1 file size = 100".to_owned());
+    }
+    #[test]
+    fn recv_packet_no_sink() {
+        let error = RecvPacketError::from(RecvPacketErrorKind::NoSink);
+        assert_eq!(*error.kind(), RecvPacketErrorKind::NoSink);
+        assert_eq!(format!("{}", error), "No sink to client for file control packet".to_owned());
+    }
+    #[test]
+    fn recv_packet_no_data_sink() {
+        let error = RecvPacketError::from(RecvPacketErrorKind::NoDataSink);
+        assert_eq!(*error.kind(), RecvPacketErrorKind::NoDataSink);
+        assert_eq!(format!("{}", error), "No sink to client for file data packet".to_owned());
+    }
+    #[test]
+    fn recv_packet_no_unknown_control_type() {
+        let error = RecvPacketError::from(RecvPacketErrorKind::UnknownControlType);
+        assert_eq!(*error.kind(), RecvPacketErrorKind::UnknownControlType);
+        assert_eq!(format!("{}", error), "File control packet has unknown control type".to_owned());
+    }
+    #[test]
+    fn recv_packet_no_alrady_exist() {
+        let error = RecvPacketError::from(RecvPacketErrorKind::AlreadyExist);
+        assert_eq!(*error.kind(), RecvPacketErrorKind::AlreadyExist);
+        assert_eq!(format!("{}", error), "File transfer session already exists".to_owned());
+    }
+    #[test]
+    fn recv_packet_no_friend() {
+        let error = RecvPacketError::from(RecvPacketErrorKind::NoFriend);
+        assert_eq!(*error.kind(), RecvPacketErrorKind::NoFriend);
+        assert_eq!(format!("{}", error), "The friend don't exist in messenger's friend list".to_owned());
+    }
+    #[test]
+    fn recv_packet_not_fransferring() {
+        let error = RecvPacketError::from(RecvPacketErrorKind::NotTransferring);
+        assert_eq!(*error.kind(), RecvPacketErrorKind::NotTransferring);
+        assert_eq!(format!("{}", error), "File transfer session is not status of transferring".to_owned());
+    }
+    #[test]
+    fn recv_packet_no_file_transfer() {
+        let error = RecvPacketError::from(RecvPacketErrorKind::NoFileTransfer);
+        assert_eq!(*error.kind(), RecvPacketErrorKind::NoFileTransfer);
+        assert_eq!(format!("{}", error), "There is no file transfer session opened".to_owned());
+    }
+    #[test]
+    fn recv_packet_send_packet() {
+        let error = RecvPacketError::from(RecvPacketErrorKind::SendPacket);
+        assert_eq!(*error.kind(), RecvPacketErrorKind::SendPacket);
+        assert_eq!(format!("{}", error), "Sending response packet error".to_owned());
+    }
+}
