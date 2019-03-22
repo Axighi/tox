@@ -95,13 +95,6 @@ type LossyTx = mpsc::UnboundedSender<(PublicKey, Vec<u8>)>;
 pub struct NetCryptoNewArgs {
     /// Sink to send packet to UDP socket
     pub udp_tx: UdpTx,
-    /// Sink to send DHT `PublicKey` when it gets known. The first key is a long
-    /// term key, the second key is a DHT key. `NetCrypto` module can learn DHT
-    /// `PublicKey` of peer from `Cookie` obtained from `CryptoHandshake`
-    /// packet. If key from `Cookie` is not equal to saved key inside
-    /// `CryptoConnection` then `NetCrypto` module will send message to this
-    /// sink.
-    pub dht_pk_tx: DhtPkTx,
     /// Sink to send lossless packets. The key is a long term public key of the
     /// peer that sent this packet.
     pub lossless_tx: LosslessTx,
@@ -133,7 +126,7 @@ pub struct NetCrypto {
     /// packet. If key from `Cookie` is not equal to saved key inside
     /// `CryptoConnection` then `NetCrypto` module will send message to this
     /// sink.
-    dht_pk_tx: DhtPkTx,
+    dht_pk_tx: Arc<RwLock<Option<DhtPkTx>>>,
     /// Sink to send lossless packets. The key is a long term public key of the
     /// peer that sent this packet.
     lossless_tx: LosslessTx,
@@ -168,7 +161,7 @@ impl NetCrypto {
     pub fn new(args: NetCryptoNewArgs) -> NetCrypto {
         NetCrypto {
             udp_tx: args.udp_tx,
-            dht_pk_tx: args.dht_pk_tx,
+            dht_pk_tx: Arc::new(RwLock::new(None)),
             lossless_tx: args.lossless_tx,
             lossy_tx: args.lossy_tx,
             dht_pk: args.dht_pk,
@@ -400,11 +393,14 @@ impl NetCrypto {
             return Box::new(future::err(HandlePacketError::from(HandlePacketErrorKind::InvalidRealPk)))
         }
         if cookie.dht_pk != connection.peer_dht_pk {
-            return Box::new(
-                send_to(&self.dht_pk_tx, (connection.peer_real_pk, cookie.dht_pk))
-                    .map_err(|e|
-                        HandlePacketError::from(e))
-                    .and_then(|()| future::err(HandlePacketError::from(HandlePacketErrorKind::InvalidDhtPk)))
+            let dht_pk_future = if let Some(ref dht_pk_tx) = *self.dht_pk_tx.read() {
+                Either::A(send_to(dht_pk_tx, (connection.peer_real_pk, cookie.dht_pk))
+                    .map_err(HandlePacketError::from))
+            } else {
+                Either::B(future::ok(()))
+            };
+            return Box::new(dht_pk_future
+                .and_then(|()| future::err(HandlePacketError::from(HandlePacketErrorKind::InvalidDhtPk)))
             )
         }
 
@@ -473,8 +469,12 @@ impl NetCrypto {
         let connection = Arc::new(RwLock::new(connection));
         self.connections.write().insert(cookie.real_pk, connection);
 
-        Either::B(send_to(&self.dht_pk_tx, (cookie.real_pk, cookie.dht_pk))
-            .map_err(|e| HandlePacketError::from(e)))
+        if let Some(ref dht_pk_tx) = *self.dht_pk_tx.read() {
+            Either::B(send_to(dht_pk_tx, (cookie.real_pk, cookie.dht_pk))
+                .map_err(|e| HandlePacketError::from(e)))
+        } else {
+            Either::A(future::ok(()))
+        }
     }
 
     /// Handle `CryptoHandshake` packet received from UDP socket
@@ -582,6 +582,8 @@ impl NetCrypto {
     /// Find the time when the last acknowledged packet was sent. This time is
     /// used to update rtt
     fn last_sent_time(send_array: &PacketsArray<SentPacket>, index: u32) -> Option<Instant> {
+        std::dbg!(index);
+
         let mut last_sent_time = None;
         for i in send_array.buffer_start .. index {
             if let Some(packet) = send_array.get(i) {
@@ -765,6 +767,10 @@ impl NetCrypto {
     /// Send `CryptoData` packet if the connection is established.
     pub fn send_data_packet(&self, connection: &mut CryptoConnection, data: Vec<u8>, packet_number: u32)
         -> impl Future<Item = (), Error = SendDataError> + Send {
+
+        std::dbg!(packet_number);
+        std::dbg!(connection.send_array.buffer_end);
+
         let packet = match connection.status {
             ConnectionStatus::NotConfirmed { ref mut sent_nonce, ref session_precomputed_key, .. }
             | ConnectionStatus::Established { ref mut sent_nonce, ref session_precomputed_key, .. } => {
@@ -829,6 +835,12 @@ impl NetCrypto {
                 return false;
             }
 
+            // println!("{:?}", connection.status);
+            // std::dbg!(connection.send_array.buffer_start);
+            // std::dbg!(connection.send_array.buffer_end);
+            // std::dbg!(connection.recv_array.buffer_start);
+            // std::dbg!(connection.recv_array.buffer_end);
+
             let send_future = self.send_status_packet(&mut connection)
                 .map_err(|e| SendDataError::from(e));
             futures.push(Box::new(send_future));
@@ -883,6 +895,10 @@ impl NetCrypto {
         let cookie = Cookie::new(real_pk, dht_pk);
         EncryptedCookie::new(&self.symmetric_key, &cookie)
     }
+
+    pub fn set_dht_pk_sink(&self, dht_pk_tx: DhtPkTx) {
+        *self.dht_pk_tx.write() = Some(dht_pk_tx);
+    }
 }
 
 #[cfg(test)]
@@ -899,7 +915,6 @@ mod tests {
     fn net_crypto_clone() {
         crypto_init().unwrap();
         let (udp_tx, _udp_rx) = mpsc::channel(1);
-        let (dht_pk_tx, _dht_pk_rx) = mpsc::unbounded();
         let (lossless_tx, _lossless_rx) = mpsc::unbounded();
         let (lossy_tx, _lossy_rx) = mpsc::unbounded();
         let (dht_pk, dht_sk) = gen_keypair();
@@ -907,7 +922,6 @@ mod tests {
         let precomputed_keys = PrecomputedCache::new(dht_sk.clone(), 1);
         let net_crypto = NetCrypto::new(NetCryptoNewArgs {
             udp_tx,
-            dht_pk_tx,
             lossless_tx,
             lossy_tx,
             dht_pk,
@@ -924,7 +938,6 @@ mod tests {
     fn add_remove_friend() {
         crypto_init().unwrap();
         let (udp_tx, _udp_rx) = mpsc::channel(1);
-        let (dht_pk_tx, _dht_pk_rx) = mpsc::unbounded();
         let (lossless_tx, _lossless_rx) = mpsc::unbounded();
         let (lossy_tx, _lossy_rx) = mpsc::unbounded();
         let (dht_pk, dht_sk) = gen_keypair();
@@ -932,7 +945,6 @@ mod tests {
         let precomputed_keys = PrecomputedCache::new(dht_sk.clone(), 1);
         let net_crypto = NetCrypto::new(NetCryptoNewArgs {
             udp_tx,
-            dht_pk_tx,
             lossless_tx,
             lossy_tx,
             dht_pk,
@@ -954,7 +966,6 @@ mod tests {
     fn handle_cookie_request() {
         crypto_init().unwrap();
         let (udp_tx, _udp_rx) = mpsc::channel(1);
-        let (dht_pk_tx, _dht_pk_rx) = mpsc::unbounded();
         let (lossless_tx, _lossless_rx) = mpsc::unbounded();
         let (lossy_tx, _lossy_rx) = mpsc::unbounded();
         let (dht_pk, dht_sk) = gen_keypair();
@@ -965,7 +976,6 @@ mod tests {
         let precomputed_keys = PrecomputedCache::new(dht_sk.clone(), 1);
         let net_crypto = NetCrypto::new(NetCryptoNewArgs {
             udp_tx,
-            dht_pk_tx,
             lossless_tx,
             lossy_tx,
             dht_pk,
@@ -997,7 +1007,6 @@ mod tests {
     fn handle_cookie_request_invalid() {
         crypto_init().unwrap();
         let (udp_tx, _udp_rx) = mpsc::channel(1);
-        let (dht_pk_tx, _dht_pk_rx) = mpsc::unbounded();
         let (lossless_tx, _lossless_rx) = mpsc::unbounded();
         let (lossy_tx, _lossy_rx) = mpsc::unbounded();
         let (dht_pk, dht_sk) = gen_keypair();
@@ -1005,7 +1014,6 @@ mod tests {
         let precomputed_keys = PrecomputedCache::new(dht_sk.clone(), 1);
         let net_crypto = NetCrypto::new(NetCryptoNewArgs {
             udp_tx,
-            dht_pk_tx,
             lossless_tx,
             lossy_tx,
             dht_pk,
@@ -1030,7 +1038,6 @@ mod tests {
     fn handle_udp_cookie_request() {
         crypto_init().unwrap();
         let (udp_tx, udp_rx) = mpsc::channel(1);
-        let (dht_pk_tx, _dht_pk_rx) = mpsc::unbounded();
         let (lossless_tx, _lossless_rx) = mpsc::unbounded();
         let (lossy_tx, _lossy_rx) = mpsc::unbounded();
         let (dht_pk, dht_sk) = gen_keypair();
@@ -1041,7 +1048,6 @@ mod tests {
         let precomputed_keys = PrecomputedCache::new(dht_sk.clone(), 1);
         let net_crypto = NetCrypto::new(NetCryptoNewArgs {
             udp_tx,
-            dht_pk_tx,
             lossless_tx,
             lossy_tx,
             dht_pk,
@@ -1082,7 +1088,6 @@ mod tests {
     fn handle_udp_cookie_request_invalid() {
         crypto_init().unwrap();
         let (udp_tx, _udp_rx) = mpsc::channel(1);
-        let (dht_pk_tx, _dht_pk_rx) = mpsc::unbounded();
         let (lossless_tx, _lossless_rx) = mpsc::unbounded();
         let (lossy_tx, _lossy_rx) = mpsc::unbounded();
         let (dht_pk, dht_sk) = gen_keypair();
@@ -1090,7 +1095,6 @@ mod tests {
         let precomputed_keys = PrecomputedCache::new(dht_sk.clone(), 1);
         let net_crypto = NetCrypto::new(NetCryptoNewArgs {
             udp_tx,
-            dht_pk_tx,
             lossless_tx,
             lossy_tx,
             dht_pk,
@@ -1117,7 +1121,6 @@ mod tests {
     fn handle_cookie_response() {
         crypto_init().unwrap();
         let (udp_tx, _udp_rx) = mpsc::channel(1);
-        let (dht_pk_tx, _dht_pk_rx) = mpsc::unbounded();
         let (lossless_tx, _lossless_rx) = mpsc::unbounded();
         let (lossy_tx, _lossy_rx) = mpsc::unbounded();
         let (dht_pk, dht_sk) = gen_keypair();
@@ -1125,7 +1128,6 @@ mod tests {
         let precomputed_keys = PrecomputedCache::new(dht_sk.clone(), 1);
         let net_crypto = NetCrypto::new(NetCryptoNewArgs {
             udp_tx,
-            dht_pk_tx,
             lossless_tx,
             lossy_tx,
             dht_pk,
@@ -1166,7 +1168,6 @@ mod tests {
     fn handle_cookie_response_invalid_status() {
         crypto_init().unwrap();
         let (udp_tx, _udp_rx) = mpsc::channel(1);
-        let (dht_pk_tx, _dht_pk_rx) = mpsc::unbounded();
         let (lossless_tx, _lossless_rx) = mpsc::unbounded();
         let (lossy_tx, _lossy_rx) = mpsc::unbounded();
         let (dht_pk, dht_sk) = gen_keypair();
@@ -1174,7 +1175,6 @@ mod tests {
         let precomputed_keys = PrecomputedCache::new(dht_sk.clone(), 1);
         let net_crypto = NetCrypto::new(NetCryptoNewArgs {
             udp_tx,
-            dht_pk_tx,
             lossless_tx,
             lossy_tx,
             dht_pk,
@@ -1218,7 +1218,6 @@ mod tests {
     fn handle_cookie_response_invalid_request_id() {
         crypto_init().unwrap();
         let (udp_tx, _udp_rx) = mpsc::channel(1);
-        let (dht_pk_tx, _dht_pk_rx) = mpsc::unbounded();
         let (lossless_tx, _lossless_rx) = mpsc::unbounded();
         let (lossy_tx, _lossy_rx) = mpsc::unbounded();
         let (dht_pk, dht_sk) = gen_keypair();
@@ -1226,7 +1225,6 @@ mod tests {
         let precomputed_keys = PrecomputedCache::new(dht_sk.clone(), 1);
         let net_crypto = NetCrypto::new(NetCryptoNewArgs {
             udp_tx,
-            dht_pk_tx,
             lossless_tx,
             lossy_tx,
             dht_pk,
@@ -1261,7 +1259,6 @@ mod tests {
     fn handle_udp_cookie_response() {
         crypto_init().unwrap();
         let (udp_tx, _udp_rx) = mpsc::channel(1);
-        let (dht_pk_tx, _dht_pk_rx) = mpsc::unbounded();
         let (lossless_tx, _lossless_rx) = mpsc::unbounded();
         let (lossy_tx, _lossy_rx) = mpsc::unbounded();
         let (dht_pk, dht_sk) = gen_keypair();
@@ -1269,7 +1266,6 @@ mod tests {
         let precomputed_keys = PrecomputedCache::new(dht_sk.clone(), 1);
         let net_crypto = NetCrypto::new(NetCryptoNewArgs {
             udp_tx,
-            dht_pk_tx,
             lossless_tx,
             lossy_tx,
             dht_pk,
@@ -1319,7 +1315,6 @@ mod tests {
     fn handle_udp_cookie_response_no_connection() {
         crypto_init().unwrap();
         let (udp_tx, _udp_rx) = mpsc::channel(1);
-        let (dht_pk_tx, _dht_pk_rx) = mpsc::unbounded();
         let (lossless_tx, _lossless_rx) = mpsc::unbounded();
         let (lossy_tx, _lossy_rx) = mpsc::unbounded();
         let (dht_pk, dht_sk) = gen_keypair();
@@ -1327,7 +1322,6 @@ mod tests {
         let precomputed_keys = PrecomputedCache::new(dht_sk.clone(), 1);
         let net_crypto = NetCrypto::new(NetCryptoNewArgs {
             udp_tx,
-            dht_pk_tx,
             lossless_tx,
             lossy_tx,
             dht_pk,
@@ -1361,7 +1355,6 @@ mod tests {
     fn handle_crypto_handshake_in_cookie_requesting_status() {
         crypto_init().unwrap();
         let (udp_tx, _udp_rx) = mpsc::channel(1);
-        let (dht_pk_tx, _dht_pk_rx) = mpsc::unbounded();
         let (lossless_tx, _lossless_rx) = mpsc::unbounded();
         let (lossy_tx, _lossy_rx) = mpsc::unbounded();
         let (dht_pk, dht_sk) = gen_keypair();
@@ -1369,7 +1362,6 @@ mod tests {
         let precomputed_keys = PrecomputedCache::new(dht_sk.clone(), 1);
         let net_crypto = NetCrypto::new(NetCryptoNewArgs {
             udp_tx,
-            dht_pk_tx,
             lossless_tx,
             lossy_tx,
             dht_pk,
@@ -1421,7 +1413,6 @@ mod tests {
     fn handle_crypto_handshake_in_not_confirmed_status() {
         crypto_init().unwrap();
         let (udp_tx, _udp_rx) = mpsc::channel(1);
-        let (dht_pk_tx, _dht_pk_rx) = mpsc::unbounded();
         let (lossless_tx, _lossless_rx) = mpsc::unbounded();
         let (lossy_tx, _lossy_rx) = mpsc::unbounded();
         let (dht_pk, dht_sk) = gen_keypair();
@@ -1429,7 +1420,6 @@ mod tests {
         let precomputed_keys = PrecomputedCache::new(dht_sk.clone(), 1);
         let net_crypto = NetCrypto::new(NetCryptoNewArgs {
             udp_tx,
-            dht_pk_tx,
             lossless_tx,
             lossy_tx,
             dht_pk,
@@ -1494,7 +1484,6 @@ mod tests {
     fn handle_crypto_handshake_invalid_status() {
         crypto_init().unwrap();
         let (udp_tx, _udp_rx) = mpsc::channel(1);
-        let (dht_pk_tx, _dht_pk_rx) = mpsc::unbounded();
         let (lossless_tx, _lossless_rx) = mpsc::unbounded();
         let (lossy_tx, _lossy_rx) = mpsc::unbounded();
         let (dht_pk, dht_sk) = gen_keypair();
@@ -1502,7 +1491,6 @@ mod tests {
         let precomputed_keys = PrecomputedCache::new(dht_sk.clone(), 1);
         let net_crypto = NetCrypto::new(NetCryptoNewArgs {
             udp_tx,
-            dht_pk_tx,
             lossless_tx,
             lossy_tx,
             dht_pk,
@@ -1552,7 +1540,6 @@ mod tests {
     fn handle_crypto_handshake_invalid_hash() {
         crypto_init().unwrap();
         let (udp_tx, _udp_rx) = mpsc::channel(1);
-        let (dht_pk_tx, _dht_pk_rx) = mpsc::unbounded();
         let (lossless_tx, _lossless_rx) = mpsc::unbounded();
         let (lossy_tx, _lossy_rx) = mpsc::unbounded();
         let (dht_pk, dht_sk) = gen_keypair();
@@ -1560,7 +1547,6 @@ mod tests {
         let precomputed_keys = PrecomputedCache::new(dht_sk.clone(), 1);
         let net_crypto = NetCrypto::new(NetCryptoNewArgs {
             udp_tx,
-            dht_pk_tx,
             lossless_tx,
             lossy_tx,
             dht_pk,
@@ -1601,7 +1587,6 @@ mod tests {
     fn handle_crypto_handshake_timed_out_cookie() {
         crypto_init().unwrap();
         let (udp_tx, _udp_rx) = mpsc::channel(1);
-        let (dht_pk_tx, _dht_pk_rx) = mpsc::unbounded();
         let (lossless_tx, _lossless_rx) = mpsc::unbounded();
         let (lossy_tx, _lossy_rx) = mpsc::unbounded();
         let (dht_pk, dht_sk) = gen_keypair();
@@ -1609,7 +1594,6 @@ mod tests {
         let precomputed_keys = PrecomputedCache::new(dht_sk.clone(), 1);
         let net_crypto = NetCrypto::new(NetCryptoNewArgs {
             udp_tx,
-            dht_pk_tx,
             lossless_tx,
             lossy_tx,
             dht_pk,
@@ -1618,6 +1602,9 @@ mod tests {
             real_sk,
             precomputed_keys,
         });
+
+        let (dht_pk_tx, dht_pk_rx) = mpsc::unbounded();
+        net_crypto.set_dht_pk_sink(dht_pk_tx);
 
         let (peer_dht_pk, _peer_dht_sk) = gen_keypair();
         let (peer_real_pk, peer_real_sk) = gen_keypair();
@@ -1651,7 +1638,6 @@ mod tests {
     fn handle_crypto_handshake_invalid_peer_real_pk() {
         crypto_init().unwrap();
         let (udp_tx, _udp_rx) = mpsc::channel(1);
-        let (dht_pk_tx, _dht_pk_rx) = mpsc::unbounded();
         let (lossless_tx, _lossless_rx) = mpsc::unbounded();
         let (lossy_tx, _lossy_rx) = mpsc::unbounded();
         let (dht_pk, dht_sk) = gen_keypair();
@@ -1659,7 +1645,6 @@ mod tests {
         let precomputed_keys = PrecomputedCache::new(dht_sk.clone(), 1);
         let net_crypto = NetCrypto::new(NetCryptoNewArgs {
             udp_tx,
-            dht_pk_tx,
             lossless_tx,
             lossy_tx,
             dht_pk,
@@ -1701,15 +1686,13 @@ mod tests {
     fn handle_crypto_handshake_invalid_peer_dht_pk() {
         crypto_init().unwrap();
         let (udp_tx, _udp_rx) = mpsc::channel(1);
-        let (dht_pk_tx, dht_pk_rx) = mpsc::unbounded();
         let (lossless_tx, _lossless_rx) = mpsc::unbounded();
         let (lossy_tx, _lossy_rx) = mpsc::unbounded();
         let (dht_pk, dht_sk) = gen_keypair();
         let (real_pk, real_sk) = gen_keypair();
         let precomputed_keys = PrecomputedCache::new(dht_sk.clone(), 1);
-        let net_crypto = NetCrypto::new(NetCryptoNewArgs {
+        let mut net_crypto = NetCrypto::new(NetCryptoNewArgs {
             udp_tx,
-            dht_pk_tx,
             lossless_tx,
             lossy_tx,
             dht_pk,
@@ -1718,6 +1701,9 @@ mod tests {
             real_sk,
             precomputed_keys,
         });
+
+        let (dht_pk_tx, dht_pk_rx) = mpsc::unbounded();
+        net_crypto.set_dht_pk_sink(dht_pk_tx);
 
         let (peer_dht_pk, _peer_dht_sk) = gen_keypair();
         let (peer_real_pk, peer_real_sk) = gen_keypair();
@@ -1758,7 +1744,6 @@ mod tests {
     fn handle_udp_crypto_handshake() {
         crypto_init().unwrap();
         let (udp_tx, _udp_rx) = mpsc::channel(1);
-        let (dht_pk_tx, _dht_pk_rx) = mpsc::unbounded();
         let (lossless_tx, _lossless_rx) = mpsc::unbounded();
         let (lossy_tx, _lossy_rx) = mpsc::unbounded();
         let (dht_pk, dht_sk) = gen_keypair();
@@ -1766,7 +1751,6 @@ mod tests {
         let precomputed_keys = PrecomputedCache::new(dht_sk.clone(), 1);
         let net_crypto = NetCrypto::new(NetCryptoNewArgs {
             udp_tx,
-            dht_pk_tx,
             lossless_tx,
             lossy_tx,
             dht_pk,
@@ -1827,7 +1811,6 @@ mod tests {
     fn handle_udp_crypto_handshake_new_connection() {
         crypto_init().unwrap();
         let (udp_tx, _udp_rx) = mpsc::channel(1);
-        let (dht_pk_tx, _dht_pk_rx) = mpsc::unbounded();
         let (lossless_tx, _lossless_rx) = mpsc::unbounded();
         let (lossy_tx, _lossy_rx) = mpsc::unbounded();
         let (dht_pk, dht_sk) = gen_keypair();
@@ -1835,7 +1818,6 @@ mod tests {
         let precomputed_keys = PrecomputedCache::new(dht_sk.clone(), 1);
         let net_crypto = NetCrypto::new(NetCryptoNewArgs {
             udp_tx,
-            dht_pk_tx,
             lossless_tx,
             lossy_tx,
             dht_pk,
@@ -1894,7 +1876,6 @@ mod tests {
     fn handle_udp_crypto_handshake_unexpected() {
         crypto_init().unwrap();
         let (udp_tx, _udp_rx) = mpsc::channel(1);
-        let (dht_pk_tx, _dht_pk_rx) = mpsc::unbounded();
         let (lossless_tx, _lossless_rx) = mpsc::unbounded();
         let (lossy_tx, _lossy_rx) = mpsc::unbounded();
         let (dht_pk, dht_sk) = gen_keypair();
@@ -1902,7 +1883,6 @@ mod tests {
         let precomputed_keys = PrecomputedCache::new(dht_sk.clone(), 1);
         let net_crypto = NetCrypto::new(NetCryptoNewArgs {
             udp_tx,
-            dht_pk_tx,
             lossless_tx,
             lossy_tx,
             dht_pk,
@@ -1943,7 +1923,6 @@ mod tests {
     fn handle_crypto_data_lossy() {
         crypto_init().unwrap();
         let (udp_tx, _udp_rx) = mpsc::channel(1);
-        let (dht_pk_tx, _dht_pk_rx) = mpsc::unbounded();
         let (lossless_tx, _lossless_rx) = mpsc::unbounded();
         let (lossy_tx, lossy_rx) = mpsc::unbounded();
         let (dht_pk, dht_sk) = gen_keypair();
@@ -1951,7 +1930,6 @@ mod tests {
         let precomputed_keys = PrecomputedCache::new(dht_sk.clone(), 1);
         let net_crypto = NetCrypto::new(NetCryptoNewArgs {
             udp_tx,
-            dht_pk_tx,
             lossless_tx,
             lossy_tx,
             dht_pk,
@@ -2005,7 +1983,6 @@ mod tests {
     fn handle_crypto_data_lossy_increment_nonce() {
         crypto_init().unwrap();
         let (udp_tx, _udp_rx) = mpsc::channel(1);
-        let (dht_pk_tx, _dht_pk_rx) = mpsc::unbounded();
         let (lossless_tx, _lossless_rx) = mpsc::unbounded();
         let (lossy_tx, lossy_rx) = mpsc::unbounded();
         let (dht_pk, dht_sk) = gen_keypair();
@@ -2013,7 +1990,6 @@ mod tests {
         let precomputed_keys = PrecomputedCache::new(dht_sk.clone(), 1);
         let net_crypto = NetCrypto::new(NetCryptoNewArgs {
             udp_tx,
-            dht_pk_tx,
             lossless_tx,
             lossy_tx,
             dht_pk,
@@ -2073,7 +2049,6 @@ mod tests {
     fn handle_crypto_data_lossy_update_rtt() {
         crypto_init().unwrap();
         let (udp_tx, _udp_rx) = mpsc::channel(1);
-        let (dht_pk_tx, _dht_pk_rx) = mpsc::unbounded();
         let (lossless_tx, _lossless_rx) = mpsc::unbounded();
         let (lossy_tx, lossy_rx) = mpsc::unbounded();
         let (dht_pk, dht_sk) = gen_keypair();
@@ -2081,7 +2056,6 @@ mod tests {
         let precomputed_keys = PrecomputedCache::new(dht_sk.clone(), 1);
         let net_crypto = NetCrypto::new(NetCryptoNewArgs {
             udp_tx,
-            dht_pk_tx,
             lossless_tx,
             lossy_tx,
             dht_pk,
@@ -2157,7 +2131,6 @@ mod tests {
     fn handle_crypto_data_lossy_invalid_buffer_start() {
         crypto_init().unwrap();
         let (udp_tx, _udp_rx) = mpsc::channel(1);
-        let (dht_pk_tx, _dht_pk_rx) = mpsc::unbounded();
         let (lossless_tx, _lossless_rx) = mpsc::unbounded();
         let (lossy_tx, _lossy_rx) = mpsc::unbounded();
         let (dht_pk, dht_sk) = gen_keypair();
@@ -2165,7 +2138,6 @@ mod tests {
         let precomputed_keys = PrecomputedCache::new(dht_sk.clone(), 1);
         let net_crypto = NetCrypto::new(NetCryptoNewArgs {
             udp_tx,
-            dht_pk_tx,
             lossless_tx,
             lossy_tx,
             dht_pk,
@@ -2214,7 +2186,6 @@ mod tests {
     fn handle_crypto_data_lossless() {
         crypto_init().unwrap();
         let (udp_tx, _udp_rx) = mpsc::channel(1);
-        let (dht_pk_tx, _dht_pk_rx) = mpsc::unbounded();
         let (lossless_tx, lossless_rx) = mpsc::unbounded();
         let (lossy_tx, _lossy_rx) = mpsc::unbounded();
         let (dht_pk, dht_sk) = gen_keypair();
@@ -2222,7 +2193,6 @@ mod tests {
         let precomputed_keys = PrecomputedCache::new(dht_sk.clone(), 1);
         let net_crypto = NetCrypto::new(NetCryptoNewArgs {
             udp_tx,
-            dht_pk_tx,
             lossless_tx,
             lossy_tx,
             dht_pk,
@@ -2305,7 +2275,6 @@ mod tests {
     fn handle_crypto_data_lossless_too_big_index() {
         crypto_init().unwrap();
         let (udp_tx, _udp_rx) = mpsc::channel(1);
-        let (dht_pk_tx, _dht_pk_rx) = mpsc::unbounded();
         let (lossless_tx, _lossless_rx) = mpsc::unbounded();
         let (lossy_tx, _lossy_rx) = mpsc::unbounded();
         let (dht_pk, dht_sk) = gen_keypair();
@@ -2313,7 +2282,6 @@ mod tests {
         let precomputed_keys = PrecomputedCache::new(dht_sk.clone(), 1);
         let net_crypto = NetCrypto::new(NetCryptoNewArgs {
             udp_tx,
-            dht_pk_tx,
             lossless_tx,
             lossy_tx,
             dht_pk,
@@ -2362,7 +2330,6 @@ mod tests {
     fn handle_crypto_data_kill() {
         crypto_init().unwrap();
         let (udp_tx, _udp_rx) = mpsc::channel(1);
-        let (dht_pk_tx, _dht_pk_rx) = mpsc::unbounded();
         let (lossless_tx, _lossless_rx) = mpsc::unbounded();
         let (lossy_tx, _lossy_rx) = mpsc::unbounded();
         let (dht_pk, dht_sk) = gen_keypair();
@@ -2370,7 +2337,6 @@ mod tests {
         let precomputed_keys = PrecomputedCache::new(dht_sk.clone(), 1);
         let net_crypto = NetCrypto::new(NetCryptoNewArgs {
             udp_tx,
-            dht_pk_tx,
             lossless_tx,
             lossy_tx,
             dht_pk,
@@ -2420,7 +2386,6 @@ mod tests {
     fn handle_crypto_data_request() {
         crypto_init().unwrap();
         let (udp_tx, _udp_rx) = mpsc::channel(1);
-        let (dht_pk_tx, _dht_pk_rx) = mpsc::unbounded();
         let (lossless_tx, _lossless_rx) = mpsc::unbounded();
         let (lossy_tx, _lossy_rx) = mpsc::unbounded();
         let (dht_pk, dht_sk) = gen_keypair();
@@ -2428,7 +2393,6 @@ mod tests {
         let precomputed_keys = PrecomputedCache::new(dht_sk.clone(), 1);
         let net_crypto = NetCrypto::new(NetCryptoNewArgs {
             udp_tx,
-            dht_pk_tx,
             lossless_tx,
             lossy_tx,
             dht_pk,
@@ -2508,7 +2472,6 @@ mod tests {
     fn handle_crypto_data_empty_request() {
         crypto_init().unwrap();
         let (udp_tx, _udp_rx) = mpsc::channel(1);
-        let (dht_pk_tx, _dht_pk_rx) = mpsc::unbounded();
         let (lossless_tx, _lossless_rx) = mpsc::unbounded();
         let (lossy_tx, _lossy_rx) = mpsc::unbounded();
         let (dht_pk, dht_sk) = gen_keypair();
@@ -2516,7 +2479,6 @@ mod tests {
         let precomputed_keys = PrecomputedCache::new(dht_sk.clone(), 1);
         let net_crypto = NetCrypto::new(NetCryptoNewArgs {
             udp_tx,
-            dht_pk_tx,
             lossless_tx,
             lossy_tx,
             dht_pk,
@@ -2568,7 +2530,6 @@ mod tests {
     fn handle_crypto_data_invalid_packet_id() {
         crypto_init().unwrap();
         let (udp_tx, _udp_rx) = mpsc::channel(1);
-        let (dht_pk_tx, _dht_pk_rx) = mpsc::unbounded();
         let (lossless_tx, _lossless_rx) = mpsc::unbounded();
         let (lossy_tx, _lossy_rx) = mpsc::unbounded();
         let (dht_pk, dht_sk) = gen_keypair();
@@ -2576,7 +2537,6 @@ mod tests {
         let precomputed_keys = PrecomputedCache::new(dht_sk.clone(), 1);
         let net_crypto = NetCrypto::new(NetCryptoNewArgs {
             udp_tx,
-            dht_pk_tx,
             lossless_tx,
             lossy_tx,
             dht_pk,
@@ -2625,7 +2585,6 @@ mod tests {
     fn handle_crypto_data_empty_data() {
         crypto_init().unwrap();
         let (udp_tx, _udp_rx) = mpsc::channel(1);
-        let (dht_pk_tx, _dht_pk_rx) = mpsc::unbounded();
         let (lossless_tx, _lossless_rx) = mpsc::unbounded();
         let (lossy_tx, _lossy_rx) = mpsc::unbounded();
         let (dht_pk, dht_sk) = gen_keypair();
@@ -2633,7 +2592,6 @@ mod tests {
         let precomputed_keys = PrecomputedCache::new(dht_sk.clone(), 1);
         let net_crypto = NetCrypto::new(NetCryptoNewArgs {
             udp_tx,
-            dht_pk_tx,
             lossless_tx,
             lossy_tx,
             dht_pk,
@@ -2682,7 +2640,6 @@ mod tests {
     fn handle_crypto_data_invalid_status() {
         crypto_init().unwrap();
         let (udp_tx, _udp_rx) = mpsc::channel(1);
-        let (dht_pk_tx, _dht_pk_rx) = mpsc::unbounded();
         let (lossless_tx, _lossless_rx) = mpsc::unbounded();
         let (lossy_tx, _lossy_rx) = mpsc::unbounded();
         let (dht_pk, dht_sk) = gen_keypair();
@@ -2690,7 +2647,6 @@ mod tests {
         let precomputed_keys = PrecomputedCache::new(dht_sk.clone(), 1);
         let net_crypto = NetCrypto::new(NetCryptoNewArgs {
             udp_tx,
-            dht_pk_tx,
             lossless_tx,
             lossy_tx,
             dht_pk,
@@ -2725,7 +2681,6 @@ mod tests {
     fn handle_udp_crypto_data_lossy() {
         crypto_init().unwrap();
         let (udp_tx, _udp_rx) = mpsc::channel(1);
-        let (dht_pk_tx, _dht_pk_rx) = mpsc::unbounded();
         let (lossless_tx, _lossless_rx) = mpsc::unbounded();
         let (lossy_tx, lossy_rx) = mpsc::unbounded();
         let (dht_pk, dht_sk) = gen_keypair();
@@ -2733,7 +2688,6 @@ mod tests {
         let precomputed_keys = PrecomputedCache::new(dht_sk.clone(), 1);
         let net_crypto = NetCrypto::new(NetCryptoNewArgs {
             udp_tx,
-            dht_pk_tx,
             lossless_tx,
             lossy_tx,
             dht_pk,
@@ -2796,7 +2750,6 @@ mod tests {
     fn send_status_packet() {
         crypto_init().unwrap();
         let (udp_tx, udp_rx) = mpsc::channel(1);
-        let (dht_pk_tx, _dht_pk_rx) = mpsc::unbounded();
         let (lossless_tx, _lossless_rx) = mpsc::unbounded();
         let (lossy_tx, _lossy_rx) = mpsc::unbounded();
         let (dht_pk, dht_sk) = gen_keypair();
@@ -2804,7 +2757,6 @@ mod tests {
         let precomputed_keys = PrecomputedCache::new(dht_sk.clone(), 1);
         let net_crypto = NetCrypto::new(NetCryptoNewArgs {
             udp_tx,
-            dht_pk_tx,
             lossless_tx,
             lossy_tx,
             dht_pk,
@@ -2845,7 +2797,6 @@ mod tests {
     fn send_packet_udp() {
         crypto_init().unwrap();
         let (udp_tx, udp_rx) = mpsc::channel(1);
-        let (dht_pk_tx, _dht_pk_rx) = mpsc::unbounded();
         let (lossless_tx, _lossless_rx) = mpsc::unbounded();
         let (lossy_tx, _lossy_rx) = mpsc::unbounded();
         let (dht_pk, dht_sk) = gen_keypair();
@@ -2853,7 +2804,6 @@ mod tests {
         let precomputed_keys = PrecomputedCache::new(dht_sk.clone(), 1);
         let net_crypto = NetCrypto::new(NetCryptoNewArgs {
             udp_tx,
-            dht_pk_tx,
             lossless_tx,
             lossy_tx,
             dht_pk,
@@ -2889,7 +2839,6 @@ mod tests {
     fn send_packet_udp_attempt() {
         crypto_init().unwrap();
         let (udp_tx, udp_rx) = mpsc::channel(1);
-        let (dht_pk_tx, _dht_pk_rx) = mpsc::unbounded();
         let (lossless_tx, _lossless_rx) = mpsc::unbounded();
         let (lossy_tx, _lossy_rx) = mpsc::unbounded();
         let (dht_pk, dht_sk) = gen_keypair();
@@ -2897,7 +2846,6 @@ mod tests {
         let precomputed_keys = PrecomputedCache::new(dht_sk.clone(), 1);
         let net_crypto = NetCrypto::new(NetCryptoNewArgs {
             udp_tx,
-            dht_pk_tx,
             lossless_tx,
             lossy_tx,
             dht_pk,
@@ -2940,7 +2888,6 @@ mod tests {
     fn send_packet_no_udp_attempt() {
         crypto_init().unwrap();
         let (udp_tx, _udp_rx) = mpsc::channel(1);
-        let (dht_pk_tx, _dht_pk_rx) = mpsc::unbounded();
         let (lossless_tx, _lossless_rx) = mpsc::unbounded();
         let (lossy_tx, _lossy_rx) = mpsc::unbounded();
         let (dht_pk, dht_sk) = gen_keypair();
@@ -2948,7 +2895,6 @@ mod tests {
         let precomputed_keys = PrecomputedCache::new(dht_sk.clone(), 1);
         let net_crypto = NetCrypto::new(NetCryptoNewArgs {
             udp_tx,
-            dht_pk_tx,
             lossless_tx,
             lossy_tx,
             dht_pk,
@@ -2980,7 +2926,6 @@ mod tests {
     fn send_packet_tcp() {
         crypto_init().unwrap();
         let (udp_tx, _udp_rx) = mpsc::channel(1);
-        let (dht_pk_tx, _dht_pk_rx) = mpsc::unbounded();
         let (lossless_tx, _lossless_rx) = mpsc::unbounded();
         let (lossy_tx, _lossy_rx) = mpsc::unbounded();
         let (dht_pk, dht_sk) = gen_keypair();
@@ -2988,7 +2933,6 @@ mod tests {
         let precomputed_keys = PrecomputedCache::new(dht_sk.clone(), 1);
         let net_crypto = NetCrypto::new(NetCryptoNewArgs {
             udp_tx,
-            dht_pk_tx,
             lossless_tx,
             lossy_tx,
             dht_pk,
@@ -3017,7 +2961,6 @@ mod tests {
     fn main_loop_sends_status_packets() {
         crypto_init().unwrap();
         let (udp_tx, udp_rx) = mpsc::channel(1);
-        let (dht_pk_tx, _dht_pk_rx) = mpsc::unbounded();
         let (lossless_tx, _lossless_rx) = mpsc::unbounded();
         let (lossy_tx, _lossy_rx) = mpsc::unbounded();
         let (dht_pk, dht_sk) = gen_keypair();
@@ -3025,7 +2968,6 @@ mod tests {
         let precomputed_keys = PrecomputedCache::new(dht_sk.clone(), 1);
         let net_crypto = NetCrypto::new(NetCryptoNewArgs {
             udp_tx,
-            dht_pk_tx,
             lossless_tx,
             lossy_tx,
             dht_pk,
@@ -3060,7 +3002,6 @@ mod tests {
     fn main_loop_removes_timed_out_connections() {
         crypto_init().unwrap();
         let (udp_tx, _udp_rx) = mpsc::channel(1);
-        let (dht_pk_tx, _dht_pk_rx) = mpsc::unbounded();
         let (lossless_tx, _lossless_rx) = mpsc::unbounded();
         let (lossy_tx, _lossy_rx) = mpsc::unbounded();
         let (dht_pk, dht_sk) = gen_keypair();
@@ -3068,7 +3009,6 @@ mod tests {
         let precomputed_keys = PrecomputedCache::new(dht_sk.clone(), 1);
         let net_crypto = NetCrypto::new(NetCryptoNewArgs {
             udp_tx,
-            dht_pk_tx,
             lossless_tx,
             lossy_tx,
             dht_pk,
@@ -3111,7 +3051,6 @@ mod tests {
     fn main_loop_sends_request_packets() {
         crypto_init().unwrap();
         let (udp_tx, udp_rx) = mpsc::channel(1);
-        let (dht_pk_tx, _dht_pk_rx) = mpsc::unbounded();
         let (lossless_tx, _lossless_rx) = mpsc::unbounded();
         let (lossy_tx, _lossy_rx) = mpsc::unbounded();
         let (dht_pk, dht_sk) = gen_keypair();
@@ -3119,7 +3058,6 @@ mod tests {
         let precomputed_keys = PrecomputedCache::new(dht_sk.clone(), 1);
         let net_crypto = NetCrypto::new(NetCryptoNewArgs {
             udp_tx,
-            dht_pk_tx,
             lossless_tx,
             lossy_tx,
             dht_pk,
@@ -3170,7 +3108,6 @@ mod tests {
     fn main_loop_sends_requested_packets() {
         crypto_init().unwrap();
         let (udp_tx, udp_rx) = mpsc::channel(1);
-        let (dht_pk_tx, _dht_pk_rx) = mpsc::unbounded();
         let (lossless_tx, _lossless_rx) = mpsc::unbounded();
         let (lossy_tx, _lossy_rx) = mpsc::unbounded();
         let (dht_pk, dht_sk) = gen_keypair();
@@ -3178,7 +3115,6 @@ mod tests {
         let precomputed_keys = PrecomputedCache::new(dht_sk.clone(), 1);
         let net_crypto = NetCrypto::new(NetCryptoNewArgs {
             udp_tx,
-            dht_pk_tx,
             lossless_tx,
             lossy_tx,
             dht_pk,
@@ -3242,7 +3178,6 @@ mod tests {
     fn send_status_packet_established() {
         crypto_init().unwrap();
         let (udp_tx, udp_rx) = mpsc::channel(1);
-        let (dht_pk_tx, _dht_pk_rx) = mpsc::unbounded();
         let (lossless_tx, _lossless_rx) = mpsc::unbounded();
         let (lossy_tx, _lossy_rx) = mpsc::unbounded();
         let (dht_pk, dht_sk) = gen_keypair();
@@ -3250,7 +3185,6 @@ mod tests {
         let precomputed_keys = PrecomputedCache::new(dht_sk.clone(), 1);
         let net_crypto = NetCrypto::new(NetCryptoNewArgs {
             udp_tx,
-            dht_pk_tx,
             lossless_tx,
             lossy_tx,
             dht_pk,
@@ -3289,7 +3223,6 @@ mod tests {
     fn send_data_packet() {
         crypto_init().unwrap();
         let (udp_tx, udp_rx) = mpsc::channel(1);
-        let (dht_pk_tx, _dht_pk_rx) = mpsc::unbounded();
         let (lossless_tx, _lossless_rx) = mpsc::unbounded();
         let (lossy_tx, _lossy_rx) = mpsc::unbounded();
         let (dht_pk, dht_sk) = gen_keypair();
@@ -3297,7 +3230,6 @@ mod tests {
         let precomputed_keys = PrecomputedCache::new(dht_sk.clone(), 1);
         let net_crypto = NetCrypto::new(NetCryptoNewArgs {
             udp_tx,
-            dht_pk_tx,
             lossless_tx,
             lossy_tx,
             dht_pk,
@@ -3353,7 +3285,6 @@ mod tests {
     fn send_request_packet() {
         crypto_init().unwrap();
         let (udp_tx, udp_rx) = mpsc::channel(1);
-        let (dht_pk_tx, _dht_pk_rx) = mpsc::unbounded();
         let (lossless_tx, _lossless_rx) = mpsc::unbounded();
         let (lossy_tx, _lossy_rx) = mpsc::unbounded();
         let (dht_pk, dht_sk) = gen_keypair();
@@ -3361,7 +3292,6 @@ mod tests {
         let precomputed_keys = PrecomputedCache::new(dht_sk.clone(), 1);
         let net_crypto = NetCrypto::new(NetCryptoNewArgs {
             udp_tx,
-            dht_pk_tx,
             lossless_tx,
             lossy_tx,
             dht_pk,
@@ -3427,7 +3357,6 @@ mod tests {
     fn send_request_packet_too_many_missing_packets() {
         crypto_init().unwrap();
         let (udp_tx, udp_rx) = mpsc::channel(1);
-        let (dht_pk_tx, _dht_pk_rx) = mpsc::unbounded();
         let (lossless_tx, _lossless_rx) = mpsc::unbounded();
         let (lossy_tx, _lossy_rx) = mpsc::unbounded();
         let (dht_pk, dht_sk) = gen_keypair();
@@ -3435,7 +3364,6 @@ mod tests {
         let precomputed_keys = PrecomputedCache::new(dht_sk.clone(), 1);
         let net_crypto = NetCrypto::new(NetCryptoNewArgs {
             udp_tx,
-            dht_pk_tx,
             lossless_tx,
             lossy_tx,
             dht_pk,
@@ -3485,7 +3413,6 @@ mod tests {
     fn send_requested_packets() {
         crypto_init().unwrap();
         let (udp_tx, udp_rx) = mpsc::channel(2);
-        let (dht_pk_tx, _dht_pk_rx) = mpsc::unbounded();
         let (lossless_tx, _lossless_rx) = mpsc::unbounded();
         let (lossy_tx, _lossy_rx) = mpsc::unbounded();
         let (dht_pk, dht_sk) = gen_keypair();
@@ -3493,7 +3420,6 @@ mod tests {
         let precomputed_keys = PrecomputedCache::new(dht_sk.clone(), 1);
         let net_crypto = NetCrypto::new(NetCryptoNewArgs {
             udp_tx,
-            dht_pk_tx,
             lossless_tx,
             lossy_tx,
             dht_pk,
@@ -3566,7 +3492,6 @@ mod tests {
     fn send_lossless() {
         crypto_init().unwrap();
         let (udp_tx, udp_rx) = mpsc::channel(2);
-        let (dht_pk_tx, _dht_pk_rx) = mpsc::unbounded();
         let (lossless_tx, _lossless_rx) = mpsc::unbounded();
         let (lossy_tx, _lossy_rx) = mpsc::unbounded();
         let (dht_pk, dht_sk) = gen_keypair();
@@ -3574,7 +3499,6 @@ mod tests {
         let precomputed_keys = PrecomputedCache::new(dht_sk.clone(), 1);
         let net_crypto = NetCrypto::new(NetCryptoNewArgs {
             udp_tx,
-            dht_pk_tx,
             lossless_tx,
             lossy_tx,
             dht_pk,
@@ -3638,7 +3562,6 @@ mod tests {
     fn send_lossless_no_connection() {
         crypto_init().unwrap();
         let (udp_tx, _udp_rx) = mpsc::channel(2);
-        let (dht_pk_tx, _dht_pk_rx) = mpsc::unbounded();
         let (lossless_tx, _lossless_rx) = mpsc::unbounded();
         let (lossy_tx, _lossy_rx) = mpsc::unbounded();
         let (dht_pk, dht_sk) = gen_keypair();
@@ -3646,7 +3569,6 @@ mod tests {
         let precomputed_keys = PrecomputedCache::new(dht_sk.clone(), 1);
         let net_crypto = NetCrypto::new(NetCryptoNewArgs {
             udp_tx,
-            dht_pk_tx,
             lossless_tx,
             lossy_tx,
             dht_pk,
@@ -3666,7 +3588,6 @@ mod tests {
     fn send_lossless_invalid_packet_id() {
         crypto_init().unwrap();
         let (udp_tx, _udp_rx) = mpsc::channel(2);
-        let (dht_pk_tx, _dht_pk_rx) = mpsc::unbounded();
         let (lossless_tx, _lossless_rx) = mpsc::unbounded();
         let (lossy_tx, _lossy_rx) = mpsc::unbounded();
         let (dht_pk, dht_sk) = gen_keypair();
@@ -3674,7 +3595,6 @@ mod tests {
         let precomputed_keys = PrecomputedCache::new(dht_sk.clone(), 1);
         let net_crypto = NetCrypto::new(NetCryptoNewArgs {
             udp_tx,
-            dht_pk_tx,
             lossless_tx,
             lossy_tx,
             dht_pk,
@@ -3694,7 +3614,6 @@ mod tests {
     fn add_connection() {
         crypto_init().unwrap();
         let (udp_tx, _udp_rx) = mpsc::channel(2);
-        let (dht_pk_tx, _dht_pk_rx) = mpsc::unbounded();
         let (lossless_tx, _lossless_rx) = mpsc::unbounded();
         let (lossy_tx, _lossy_rx) = mpsc::unbounded();
         let (dht_pk, dht_sk) = gen_keypair();
@@ -3702,7 +3621,6 @@ mod tests {
         let precomputed_keys = PrecomputedCache::new(dht_sk.clone(), 1);
         let net_crypto = NetCrypto::new(NetCryptoNewArgs {
             udp_tx,
-            dht_pk_tx,
             lossless_tx,
             lossy_tx,
             dht_pk,
@@ -3733,7 +3651,6 @@ mod tests {
     fn add_connection_already_exists() {
         crypto_init().unwrap();
         let (udp_tx, _udp_rx) = mpsc::channel(2);
-        let (dht_pk_tx, _dht_pk_rx) = mpsc::unbounded();
         let (lossless_tx, _lossless_rx) = mpsc::unbounded();
         let (lossy_tx, _lossy_rx) = mpsc::unbounded();
         let (dht_pk, dht_sk) = gen_keypair();
@@ -3741,7 +3658,6 @@ mod tests {
         let precomputed_keys = PrecomputedCache::new(dht_sk.clone(), 1);
         let net_crypto = NetCrypto::new(NetCryptoNewArgs {
             udp_tx,
-            dht_pk_tx,
             lossless_tx,
             lossy_tx,
             dht_pk,
@@ -3770,7 +3686,6 @@ mod tests {
     fn set_friend_udp_addr() {
         crypto_init().unwrap();
         let (udp_tx, _udp_rx) = mpsc::channel(2);
-        let (dht_pk_tx, _dht_pk_rx) = mpsc::unbounded();
         let (lossless_tx, _lossless_rx) = mpsc::unbounded();
         let (lossy_tx, _lossy_rx) = mpsc::unbounded();
         let (dht_pk, dht_sk) = gen_keypair();
@@ -3778,7 +3693,6 @@ mod tests {
         let precomputed_keys = PrecomputedCache::new(dht_sk.clone(), 1);
         let net_crypto = NetCrypto::new(NetCryptoNewArgs {
             udp_tx,
-            dht_pk_tx,
             lossless_tx,
             lossy_tx,
             dht_pk,
@@ -3810,7 +3724,6 @@ mod tests {
     fn set_friend_udp_addr_update() {
         crypto_init().unwrap();
         let (udp_tx, _udp_rx) = mpsc::channel(2);
-        let (dht_pk_tx, _dht_pk_rx) = mpsc::unbounded();
         let (lossless_tx, _lossless_rx) = mpsc::unbounded();
         let (lossy_tx, _lossy_rx) = mpsc::unbounded();
         let (dht_pk, dht_sk) = gen_keypair();
@@ -3818,7 +3731,6 @@ mod tests {
         let precomputed_keys = PrecomputedCache::new(dht_sk.clone(), 1);
         let net_crypto = NetCrypto::new(NetCryptoNewArgs {
             udp_tx,
-            dht_pk_tx,
             lossless_tx,
             lossy_tx,
             dht_pk,
@@ -3854,7 +3766,6 @@ mod tests {
     fn set_friend_udp_addr_no_connection() {
         crypto_init().unwrap();
         let (udp_tx, _udp_rx) = mpsc::channel(2);
-        let (dht_pk_tx, _dht_pk_rx) = mpsc::unbounded();
         let (lossless_tx, _lossless_rx) = mpsc::unbounded();
         let (lossy_tx, _lossy_rx) = mpsc::unbounded();
         let (dht_pk, dht_sk) = gen_keypair();
@@ -3862,7 +3773,6 @@ mod tests {
         let precomputed_keys = PrecomputedCache::new(dht_sk.clone(), 1);
         let net_crypto = NetCrypto::new(NetCryptoNewArgs {
             udp_tx,
-            dht_pk_tx,
             lossless_tx,
             lossy_tx,
             dht_pk,
