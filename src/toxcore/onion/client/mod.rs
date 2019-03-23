@@ -32,6 +32,8 @@ use crate::toxcore::onion::packet::*;
 use crate::toxcore::packed_node::*;
 use crate::toxcore::tcp::client::{Connections as TcpConnections};
 use crate::toxcore::time::*;
+use crate::toxcore::messenger::*;
+use crate::toxcore::state_format::old::FriendStatus;
 
 /// Shorthand for the transmit half of the message channel for sending DHT
 /// `PublicKey` when it gets known. The first key is a long term key, the second
@@ -71,9 +73,9 @@ const DHT_DHTPK_SEND_INTERVAL: u64 = 20;
 const MIN_NODE_PING_TIME: u64 = 10;
 
 #[derive(Clone, Debug)]
-struct OnionFriend {
+pub struct OnionFriend {
     /// Friend's long term `PublicKey`.
-    real_pk: PublicKey,
+    pub real_pk: PublicKey,
     /// Friend's DHT `PublicKey` if it's known.
     dht_pk: Option<PublicKey>,
     /// Temporary `PublicKey` that should be used to encrypt search requests for
@@ -93,6 +95,14 @@ struct OnionFriend {
     /// Time when our DHT `PublicKey` was sent to this friend via DHT request
     /// last time.
     last_dht_pk_dht_sent: Option<Instant>,
+    /// Number of files sending.
+    pub num_sending_files: u8,
+    /// File transfer objects for sending.
+    pub files_sending: Arc<RwLock<Vec<Option<FileTransfers>>>>,
+    /// File transfer objects for receiving.
+    pub files_receiving: Arc<RwLock<Vec<Option<FileTransfers>>>>,
+    /// Status of friend.
+    pub status: FriendStatus,
 }
 
 impl OnionFriend {
@@ -108,6 +118,10 @@ impl OnionFriend {
             last_no_reply: 0,
             last_dht_pk_onion_sent: None,
             last_dht_pk_dht_sent: None,
+            num_sending_files: 0,
+            files_sending: Arc::new(RwLock::new(vec![None; MAX_CONCURRENT_FILE_PIPES as usize])),
+            files_receiving: Arc::new(RwLock::new(vec![None; MAX_CONCURRENT_FILE_PIPES as usize])),
+            status: FriendStatus::Online,
         }
     }
 }

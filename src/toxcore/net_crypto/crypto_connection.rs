@@ -672,25 +672,6 @@ impl CryptoConnection {
             _ => false,
         }
     }
-
-    /// Check if packet_number was received by the other size.
-    ///
-    /// Note: The condition `buffer_end - buffer_start < packet_number - buffer_start` is
-    /// a trick which handles situations `buffer_end >= buffer_start` and
-    /// buffer_end < buffer_start` (when buffer_end overflowed) both correctly.
-    ///
-    /// It CANNOT be simplified to `packet_number < buffer_start`, as it will fail
-    /// when `buffer_end < buffer_start`.
-    pub fn is_packet_received(&self, packet_number: u32) -> bool {
-        let num =  self.send_array.buffer_end - self.send_array.buffer_start;
-        let num1 = packet_number - self.send_array.buffer_start;
-
-        if num < num1 {
-            true
-        } else {
-            false
-        }
-    }
 }
 
 #[cfg(test)]

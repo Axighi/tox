@@ -765,7 +765,7 @@ impl NetCrypto {
     }
 
     /// Send `CryptoData` packet if the connection is established.
-    pub fn send_data_packet(&self, connection: &mut CryptoConnection, data: Vec<u8>, packet_number: u32)
+    fn send_data_packet(&self, connection: &mut CryptoConnection, data: Vec<u8>, packet_number: u32)
         -> impl Future<Item = (), Error = SendDataError> + Send {
 
         std::dbg!(packet_number);
