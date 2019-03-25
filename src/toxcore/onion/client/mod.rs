@@ -19,7 +19,7 @@ use tokio::timer::Interval;
 
 use crate::toxcore::crypto_core::*;
 use crate::toxcore::dht::packed_node::PackedNode;
-use crate::toxcore::dht::packet::*;
+use crate::toxcore::dht::packet::{Packet as DhtPacket, *};
 use crate::toxcore::dht::request_queue::RequestQueue;
 use crate::toxcore::dht::server::{Server as DhtServer};
 use crate::toxcore::dht::kbucket::*;
@@ -32,7 +32,7 @@ use crate::toxcore::onion::packet::*;
 use crate::toxcore::packed_node::*;
 use crate::toxcore::tcp::client::{Connections as TcpConnections};
 use crate::toxcore::time::*;
-use crate::toxcore::messenger::*;
+use crate::toxcore::messenger::{Packet as MsgPacket, *};
 use crate::toxcore::state_format::old::FriendStatus;
 
 /// Shorthand for the transmit half of the message channel for sending DHT
@@ -420,7 +420,7 @@ impl OnionClient {
             let inner_announce_request = announce_packet_data.request(&node.pk, None, request_id);
             let onion_request = path.create_onion_request(node.saddr, InnerOnionRequest::InnerOnionAnnounceRequest(inner_announce_request));
 
-            futures.push(send_to(&self.dht.tx, (Packet::OnionRequest0(onion_request), path.nodes[0].saddr)));
+            futures.push(send_to(&self.dht.tx, (DhtPacket::OnionRequest0(onion_request), path.nodes[0].saddr)));
         }
 
         Box::new(future::join_all(futures)
@@ -504,7 +504,7 @@ impl OnionClient {
         announce_requests: &mut RequestQueue<AnnounceRequestData>,
         announce_packet_data: AnnouncePacketData,
         friend_pk: Option<PublicKey>
-    ) -> Vec<(Packet, SocketAddr)> {
+    ) -> Vec<(DhtPacket, SocketAddr)> {
         let mut packets = Vec::new();
 
         let mut good_nodes_count = 0;
@@ -546,7 +546,7 @@ impl OnionClient {
                 let inner_announce_request = announce_packet_data.request(&node.pk, node.ping_id, request_id);
                 let onion_request = path.create_onion_request(node.saddr, InnerOnionRequest::InnerOnionAnnounceRequest(inner_announce_request));
 
-                packets.push((Packet::OnionRequest0(onion_request), path.nodes[0].saddr));
+                packets.push((DhtPacket::OnionRequest0(onion_request), path.nodes[0].saddr));
             }
         }
 
@@ -574,7 +574,7 @@ impl OnionClient {
                 let inner_announce_request = announce_packet_data.request(&node.pk, None, request_id);
                 let onion_request = path.create_onion_request(node.saddr, InnerOnionRequest::InnerOnionAnnounceRequest(inner_announce_request));
 
-                packets.push((Packet::OnionRequest0(onion_request), path.nodes[0].saddr));
+                packets.push((DhtPacket::OnionRequest0(onion_request), path.nodes[0].saddr));
             }
         }
 
@@ -672,7 +672,7 @@ impl OnionClient {
 
                     let onion_request = path.create_onion_request(node.saddr, InnerOnionRequest::InnerOnionDataRequest(inner_data_request));
 
-                    packets.push((Packet::OnionRequest0(onion_request), path.nodes[0].saddr));
+                    packets.push((DhtPacket::OnionRequest0(onion_request), path.nodes[0].saddr));
                 }
 
                 if packets.len() != packets_len {
@@ -687,7 +687,7 @@ impl OnionClient {
                     let dht_pk_announce = DhtPkAnnounce::new(&precompute(&friend.real_pk, &self.real_sk), self.real_pk, &dht_pk_announce_payload);
                     let payload = DhtRequestPayload::DhtPkAnnounce(dht_pk_announce);
                     let packet = DhtRequest::new(&precompute(&friend_dht_pk, &self.dht.sk), &friend_dht_pk, &self.dht.pk, &payload);
-                    let packet = Packet::DhtRequest(packet);
+                    let packet = DhtPacket::DhtRequest(packet);
 
                     let nodes = self.dht.get_closest(&friend_dht_pk, 8, false);
 

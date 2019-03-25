@@ -15,7 +15,7 @@ mod cookie_response;
 mod bootstrap_info;
 mod lan_discovery;
 mod crypto_handshake;
-pub mod crypto_data;
+mod crypto_data;
 mod cookie;
 mod errors;
 

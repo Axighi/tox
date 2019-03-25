@@ -29,10 +29,7 @@ use tox::toxcore::onion::client::*;
 use tox::toxcore::tcp::client::Connections;
 use tox::toxcore::stats::Stats;
 use tox::toxcore::messenger::Messenger;
-use tox::toxcore::messenger::packet::Packet;
-use tox::toxcore::messenger::packet::file_data::*;
-use tox::toxcore::messenger::packet::file_control::*;
-use tox::toxcore::messenger::packet::file_send_request::*;
+use tox::toxcore::messenger::{Packet as MsgPacket, *};
 use tox::toxcore::binary_io::*;
 
 const BOOTSTRAP_NODES: [(&str, &str); 9] = [

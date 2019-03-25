@@ -9,12 +9,12 @@ mod offline;
 mod message;
 mod nickname;
 mod msi;
-pub mod file_control;
+mod file_control;
 mod typing;
 mod user_status;
-pub mod file_data;
+mod file_data;
 mod status_message;
-pub mod file_send_request;
+mod file_send_request;
 
 pub use self::online::*;
 pub use self::action::*;

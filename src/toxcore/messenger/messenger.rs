@@ -17,9 +17,9 @@ use crate::toxcore::net_crypto::*;
 use crate::toxcore::state_format::old::*;
 use crate::toxcore::messenger::packet::*;
 use crate::toxcore::io_tokio::*;
-use crate::toxcore::dht::packet::crypto_data::MAX_CRYPTO_DATA_SIZE;
+use crate::toxcore::dht::packet::{Packet as DhtPacket, *};
 use crate::toxcore::messenger::errors::*;
-use crate::toxcore::messenger::packet::file_data::MAX_FILE_DATA_SIZE;
+use crate::toxcore::messenger::packet::{Packet as MsgPacket, *};
 use crate::toxcore::onion::client::*;
 
 /// Because `file_id` is `u8` this const can not be larger than 256.
@@ -94,9 +94,9 @@ pub struct Messenger {
     /// NetCrypto object
     net_crypto: Option<NetCrypto>,
     /// Sink for file control packets
-    recv_file_control_tx: Option<UnboundedSender<(PublicKey, Packet)>>,
+    recv_file_control_tx: Option<UnboundedSender<(PublicKey, MsgPacket)>>,
     /// Sink for file data packts, `u64` is for file position.
-    recv_file_data_tx: Option<Sender<(PublicKey, Packet, u64)>>,
+    recv_file_data_tx: Option<Sender<(PublicKey, MsgPacket, u64)>>,
 }
 
 impl Messenger {
@@ -121,12 +121,12 @@ impl Messenger {
     }
 
     /// Set tx for receiver's file control packet.
-    pub fn set_tx_file_control(&mut self, tx: UnboundedSender<(PublicKey, Packet)>) {
+    pub fn set_tx_file_control(&mut self, tx: UnboundedSender<(PublicKey, MsgPacket)>) {
         self.recv_file_control_tx = Some(tx);
     }
 
     /// Set tx for receiver's file data pacekt.
-    pub fn set_tx_file_data(&mut self, tx: Sender<(PublicKey, Packet, u64)>) {
+    pub fn set_tx_file_data(&mut self, tx: Sender<(PublicKey, MsgPacket, u64)>) {
         self.recv_file_data_tx = Some(tx);
     }
 
@@ -278,7 +278,7 @@ impl Messenger {
         }
     }
 
-    fn recv_from(&self, friend_pk: PublicKey, packet: Packet) -> impl Future<Item=(), Error=RecvPacketError> + Send {
+    fn recv_from(&self, friend_pk: PublicKey, packet: MsgPacket) -> impl Future<Item=(), Error=RecvPacketError> + Send {
         if let Some(tx) = self.recv_file_control_tx.clone() {
             Either::A(send_to(&tx, (friend_pk, packet))
                 .map_err(|e| RecvPacketError::from(e)))
@@ -287,7 +287,7 @@ impl Messenger {
         }
     }
 
-    fn recv_from_data(&self, friend_pk: PublicKey, packet: Packet, position: u64) -> impl Future<Item=(), Error=RecvPacketError> + Send {
+    fn recv_from_data(&self, friend_pk: PublicKey, packet: MsgPacket, position: u64) -> impl Future<Item=(), Error=RecvPacketError> + Send {
         if let Some(tx) = self.recv_file_data_tx.clone() {
             Either::A(send_to(&tx, (friend_pk, packet, position))
                 .map_err(|e| RecvPacketError::from(e)))
@@ -316,7 +316,7 @@ impl Messenger {
 
             if let Some(ft) = ft_write.get_mut(packet.file_id as usize) {
                 let future = if let Some(ft) = ft {
-                    let up_packet = Packet::FileControl(packet.clone());
+                    let up_packet = MsgPacket::FileControl(packet.clone());
 
                     if packet.control_type == ControlType::Accept {
                         if packet.transfer_direction == TransferDirection::Receive && ft.status == TransferStatus::NotAccepted {
@@ -391,7 +391,7 @@ impl Messenger {
 
                     ft_write[packet.file_id as usize] = Some(ft);
 
-                    Either::A(self.recv_from(friend.real_pk, Packet::FileSendRequest(packet)))
+                    Either::A(self.recv_from(friend.real_pk, MsgPacket::FileSendRequest(packet)))
                 }
             } else {
                 Either::B(future::err(RecvPacketErrorKind::NoFileTransfer.into()))
@@ -426,12 +426,12 @@ impl Messenger {
                     ft.transferred = ft.transferred.add(data_len);
 
                     let mut futures = Vec::new();
-                    let up_packet = Packet::FileData(packet.clone());
+                    let up_packet = MsgPacket::FileData(packet.clone());
 
                     futures.push(self.recv_from_data(friend.real_pk, up_packet, position));
 
                     if data_len > 0 && (ft.transferred >= ft.size || data_len != MAX_FILE_DATA_SIZE as u64) {
-                        let packet = Packet::FileData(FileData::new(packet.file_id, Vec::new()));
+                        let packet = MsgPacket::FileData(FileData::new(packet.file_id, Vec::new()));
                         futures.push(self.recv_from_data(friend.real_pk, packet, position));
                     }
 
