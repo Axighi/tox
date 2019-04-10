@@ -15,6 +15,7 @@ mod freeze_peer;
 mod chane_name;
 mod change_title;
 mod grp_message;
+mod grp_action;
 
 pub use self::invite::*;
 pub use self::invite_response::*;
@@ -30,6 +31,7 @@ pub use self::freeze_peer::*;
 pub use self::chane_name::*;
 pub use self::change_title::*;
 pub use self::grp_message::*;
+pub use self::grp_action::*;
 
 use nom::be_u8;
 use crate::toxcore::binary_io::*;
@@ -118,6 +120,8 @@ pub enum Packet {
     ChangeTitle(ChangeTitle),
     /// [`GrpMessage`](./struct.GrpMessage.html) structure.
     GrpMessage(GrpMessage),
+    /// [`GrpAction`](./struct.GrpAction.html) structure.
+    GrpAction(GrpAction),
 }
 
 impl ToBytes for Packet {
@@ -136,6 +140,7 @@ impl ToBytes for Packet {
             Packet::ChangeName(ref p) => p.to_bytes(buf),
             Packet::ChangeTitle(ref p) => p.to_bytes(buf),
             Packet::GrpMessage(ref p) => p.to_bytes(buf),
+            Packet::GrpAction(ref p) => p.to_bytes(buf),
         }
     }
 }
@@ -154,7 +159,8 @@ impl FromBytes for Packet {
         map!(FreezePeer::from_bytes, Packet::FreezePeer) |
         map!(ChangeName::from_bytes, Packet::ChangeName) |
         map!(ChangeTitle::from_bytes, Packet::ChangeTitle) |
-        map!(GrpMessage::from_bytes, Packet::GrpMessage)
+        map!(GrpMessage::from_bytes, Packet::GrpMessage) |
+        map!(GrpAction::from_bytes, Packet::GrpAction)
     ));
 }
 
@@ -240,5 +246,10 @@ mod tests {
     encode_decode_test!(
         packet_group_message_encode_decode,
         Packet::GrpMessage(GrpMessage::new(1, 2, 3, "1234".to_owned()))
+    );
+
+    encode_decode_test!(
+        packet_group_action_encode_decode,
+        Packet::GrpAction(GrpAction::new(1, 2, 3, "1234".to_owned()))
     );
 }
